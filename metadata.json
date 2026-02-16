@@ -1,8 +1,9 @@
 {
   "name": "Lumina: The Evolving Soul",
-  "description": "A reimagined virtual companion game for 2026. Lumina isn't just a pet; it's a multimodal AI soul that hears your voice, sees your world, and evolves its personality and appearance based on your unique interactions using Gemini's cutting-edge capabilities.",
+  "description": "A reimagined virtual companion game. Lumina is a multimodal AI soul that hears your voice, sees your world, and evolves using Gemini's cutting-edge capabilities.",
   "requestFramePermissions": [
     "camera",
-    "microphone"
+    "microphone",
+    "geolocation"
   ]
 }
