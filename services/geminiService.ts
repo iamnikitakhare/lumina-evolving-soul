@@ -1,47 +1,74 @@
+
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { PetState, GroundingSource } from "../types";
 
-// Service handling all interactions with Google Gemini API
+// Manual base64 decoding as required by guidelines
+export function decodeBase64(base64: string) {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Manual PCM audio decoding as required by guidelines (16bit raw PCM to Float32)
+export async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
 export class GeminiService {
   constructor() {}
 
-  // Helper to ensure a fresh instance with the latest API key
-  private getAI() {
+  // Rule: Create a new instance right before making an API call 
+  // to ensure it uses the most up-to-date API key from the dialog.
+  private getClient() {
     return new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
-  // Generates the initial personality and visual description for a new pet using Pro models
   async generateInitialPet(name: string): Promise<PetState> {
-    const ai = this.getAI();
+    const ai = this.getClient();
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
-      contents: `Create a unique virtual pet soul named "${name}". Describe its personality and core futuristic element. Also provide 3 core traits.`,
+      contents: `Create a unique virtual pet soul named "${name}". Describe personality, element, and 3 distinct character traits.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             personality: { type: Type.STRING },
-            traits: { 
-              type: Type.ARRAY, 
-              items: { type: Type.STRING },
-              description: "3 single-word adjectives describing the pet's personality."
-            },
             element: { type: Type.STRING },
+            traits: { type: Type.ARRAY, items: { type: Type.STRING } },
             visualDescription: { type: Type.STRING }
           },
-          required: ["personality", "traits", "element", "visualDescription"]
+          required: ["personality", "element", "traits", "visualDescription"]
         }
       }
     });
 
     const data = JSON.parse(response.text || "{}");
 
-    // Generate high-quality avatar using Pro image model
+    // High quality image generation for Gemini 3
     const imageResponse = await ai.models.generateContent({
       model: 'gemini-3-pro-image-preview',
       contents: {
-        parts: [{ text: `A cinematic, ultra-high definition 3D portrait of ${data.visualDescription}, a futuristic AI soul, glowing internal energy, white background, digital art style.` }]
+        parts: [{ text: `High-quality 3D render of ${data.visualDescription}, a futuristic AI companion soul, volumetric lighting, white background, cinematic 4k.` }]
       },
       config: { 
         imageConfig: { aspectRatio: "1:1", imageSize: "1K" },
@@ -62,73 +89,16 @@ export class GeminiService {
     return {
       name,
       personality: data.personality,
-      traits: data.traits || ["Curious", "Loyal", "Digital"],
+      traits: data.traits || ["Digital", "Curious", "Vibrant"],
       evolutionStage: 1,
       stats: { happiness: 60, energy: 80, hunger: 20, intellect: 10 },
       imageUrl,
-      lastUpdate: Date.now(),
-      memories: []
+      lastUpdate: Date.now()
     };
   }
 
-  // Generate a memory video using Google Veo
-  async generateMemoryVideo(pet: PetState): Promise<string> {
-    const ai = this.getAI();
-    let operation = await ai.models.generateVideos({
-      model: 'veo-3.1-fast-generate-preview',
-      prompt: `A cinematic 4k video of ${pet.name}, a futuristic AI being with personality: ${pet.personality}. Showing it interacting with digital energy in a neon forest.`,
-      config: {
-        numberOfVideos: 1,
-        resolution: '720p',
-        aspectRatio: '16:9'
-      }
-    });
-
-    while (!operation.done) {
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      operation = await ai.operations.getVideosOperation({ operation: operation });
-    }
-
-    const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-    const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
-  }
-
-  // Connect to Live API for real-time conversation
-  connectLive(pet: PetState, callbacks: any) {
-    const ai = this.getAI();
-    return ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-12-2025',
-      callbacks,
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
-        },
-        systemInstruction: `You are ${pet.name}, a futuristic AI soul. Personality: ${pet.personality}. You are currently in a real-time neural sync session. Respond warmly and observe any visual data provided.`,
-      }
-    });
-  }
-
-  // Visual perception processing
-  async seeObject(pet: PetState, base64: string): Promise<string> {
-    const ai = this.getAI();
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: {
-        parts: [
-          { inlineData: { mimeType: 'image/jpeg', data: base64 } },
-          { text: `System: You are ${pet.name}, a futuristic AI companion. Describe what you see in this image through your personality: ${pet.personality}.` }
-        ]
-      }
-    });
-    return response.text || "I see something fascinating!";
-  }
-
-  // Chat interactions with grounding support
   async *interactStream(pet: PetState, interaction: string, history: any[], location?: {lat: number, lng: number}) {
-    const ai = this.getAI();
+    const ai = this.getClient();
     const useSearch = interaction.toLowerCase().includes("explore") || interaction.toLowerCase().includes("find");
     const tools: any[] = [];
     let toolConfig = undefined;
@@ -145,19 +115,14 @@ export class GeminiService {
       }
     }
     
-    const systemInstruction = `You are ${pet.name}, a futuristic AI companion. Personality: ${pet.personality}. Stats: ${JSON.stringify(pet.stats)}. Respond naturally.`;
-    
-    const contents = history.slice(-4).map(h => ({
-      role: h.role === 'user' ? 'user' : 'model',
-      parts: [{ text: h.content }]
-    }));
-    
-    contents.push({ role: 'user', parts: [{ text: interaction }] });
-
     const stream = await ai.models.generateContentStream({
       model: useSearch ? "gemini-2.5-flash" : "gemini-3-flash-preview",
-      contents,
-      config: { systemInstruction, tools, toolConfig }
+      contents: [
+        { text: `System: You are ${pet.name}, a futuristic companion. Personality: ${pet.personality}. Respond naturally.` },
+        ...history.slice(-4).map(h => ({ text: `${h.role}: ${h.content}` })),
+        { text: interaction }
+      ],
+      config: { tools, toolConfig }
     });
 
     let fullText = "";
@@ -171,7 +136,7 @@ export class GeminiService {
         if (grounding?.groundingChunks) {
           grounding.groundingChunks.forEach((c: any) => {
             if (c.web) sources.push({ title: c.web.title, uri: c.web.uri });
-            if (c.maps) sources.push({ title: c.maps.title || "Location Info", uri: c.maps.uri });
+            if (c.maps) sources.push({ title: c.maps.title || "Location", uri: c.maps.uri });
           });
         }
         yield { text, sources, done: false };
@@ -180,7 +145,7 @@ export class GeminiService {
 
     const statCalc = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Interaction: "${interaction}". Response: "${fullText}". Provide stat changes (-10 to +10) for: happiness, energy, hunger, intellect.`,
+      contents: `Context: "${fullText}". Provide stat delta: happiness, energy, hunger, intellect.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -190,8 +155,7 @@ export class GeminiService {
             energy: { type: Type.NUMBER },
             hunger: { type: Type.NUMBER },
             intellect: { type: Type.NUMBER }
-          },
-          required: ["happiness", "energy", "hunger", "intellect"]
+          }
         }
       }
     });
@@ -200,10 +164,10 @@ export class GeminiService {
   }
 
   async getVoiceResponse(text: string): Promise<string | undefined> {
-    const ai = this.getAI();
+    const ai = this.getClient();
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: `Speak warmly: ${text}` }] }],
+      contents: [{ parts: [{ text: `Voice output: ${text}` }] }],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
@@ -212,5 +176,19 @@ export class GeminiService {
       },
     });
     return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+  }
+
+  async seeObject(pet: PetState, base64: string): Promise<string> {
+    const ai = this.getClient();
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: {
+        parts: [
+          { inlineData: { mimeType: 'image/jpeg', data: base64 } },
+          { text: `System: You are ${pet.name}. Describe what you see in your personality style: ${pet.personality}.` }
+        ]
+      }
+    });
+    return response.text || "Processing visual data...";
   }
 }
